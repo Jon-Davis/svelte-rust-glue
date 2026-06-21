@@ -31,7 +31,7 @@ Add it as a build dependency:
 ```toml
 # Cargo.toml
 [build-dependencies]
-svelte-rust = { path = "../svelte-rust" } # or a git/version reference
+svelte-rust = { git = "https://github.com/Jon-Davis/svelte-rust-glue.git" } # or a path/version reference
 ```
 
 Call it from your build script:
@@ -64,4 +64,3 @@ const BUILD_DIR: &str = env!("SVELTE_BUILD_DIR");
   elsewhere).
 - `typeshare` CLI, if you use `typescript_types`:
   `cargo install typeshare-cli`.
-```
