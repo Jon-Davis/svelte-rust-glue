@@ -8,20 +8,51 @@ pub mod build {
     use crate::npm;
     use crate::typeshare;
 
+    /// Project config files that affect the frontend build. Each is watched only
+    /// if it exists, so projects that omit one (e.g. `tsconfig.json`) don't get a
+    /// spurious `rerun-if-changed` for a missing path.
+    const CONFIG_FILES: &[&str] = &[
+        "svelte.config.js",
+        "vite.config.js",
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+    ];
+
+    /// Manifests whose modification should force a re-`npm install`.
+    const INSTALL_MANIFESTS: &[&str] = &["package.json", "package-lock.json"];
+
+    /// Frontend source extensions. Files under `src/` with these extensions are
+    /// watched; `.rs` files (which may be colocated in the same directories, e.g.
+    /// SvelteKit routes alongside backend route handlers) are deliberately not,
+    /// so editing backend code doesn't trigger a frontend rebuild.
+    const FRONTEND_EXTS: &[&str] = &["svelte", "ts", "js", "mjs", "css", "html"];
+
     /// Emit `cargo:rerun-if-changed` directives for all SvelteKit-related files,
     /// run `npm install` when dependencies change, and run `npm run build`.
     ///
     /// `build_dir` is the SvelteKit static adapter output directory (e.g. `"build"`).
     /// It is forwarded as `SVELTE_BUILD_DIR` at compile time so the runtime can use
     /// `env!("SVELTE_BUILD_DIR")` instead of hardcoding the path.
+    ///
+    /// Frontend sources under `src/` are watched **by extension** (see
+    /// [`FRONTEND_EXTS`]) so that `.rs` files colocated in the same directories do
+    /// not trigger a frontend rebuild. `static/`, if present, is watched wholesale.
     pub fn frontend(build_dir: &str) {
         println!("cargo:rustc-env=SVELTE_BUILD_DIR={build_dir}");
 
-        println!("cargo:rerun-if-changed=svelte.config.js");
-        println!("cargo:rerun-if-changed=vite.config.js");
-        println!("cargo:rerun-if-changed=package.json");
-        println!("cargo:rerun-if-changed=src/app.html");
-        println!("cargo:rerun-if-changed=src/routes");
+        for config in CONFIG_FILES {
+            if Path::new(config).exists() {
+                println!("cargo:rerun-if-changed={config}");
+            }
+        }
+
+        watch_frontend(Path::new("src"));
+        if Path::new("static").exists() {
+            // No `.rs` lives under `static/`, so watch it wholesale — this also
+            // covers images, fonts, and favicons that the build copies through.
+            println!("cargo:rerun-if-changed=static");
+        }
 
         if needs_install() {
             npm::run(&["install"]);
@@ -30,19 +61,42 @@ pub mod build {
         npm::run(&["run", "build"]);
     }
 
-    /// Whether `npm install` should run: `node_modules` is missing, or
-    /// `package.json` is newer than `node_modules` (i.e. dependencies changed
-    /// since the last install). Falls back to installing if either mtime is
+    /// Whether `npm install` should run: `node_modules` is missing, or a manifest
+    /// in [`INSTALL_MANIFESTS`] is newer than `node_modules` (i.e. dependencies
+    /// changed since the last install). Falls back to installing if a mtime is
     /// unavailable.
     fn needs_install() -> bool {
         let node_modules = Path::new("node_modules");
         if !node_modules.exists() {
             return true;
         }
-        let mtime = |p: &str| fs::metadata(p).and_then(|m| m.modified()).ok();
-        match (mtime("package.json"), node_modules.metadata().and_then(|m| m.modified()).ok()) {
-            (Some(pkg), Some(installed)) => pkg > installed,
-            _ => true,
+        let Some(installed) = node_modules.metadata().and_then(|m| m.modified()).ok() else {
+            return true;
+        };
+        INSTALL_MANIFESTS.iter().any(|manifest| {
+            fs::metadata(manifest)
+                .and_then(|m| m.modified())
+                .is_ok_and(|mtime| mtime > installed)
+        })
+    }
+
+    /// Recurse `dir`, emitting `rerun-if-changed` for each file whose extension is
+    /// in [`FRONTEND_EXTS`].
+    fn watch_frontend(dir: &Path) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                watch_frontend(&path);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| FRONTEND_EXTS.contains(&e))
+            {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
         }
     }
 
@@ -91,5 +145,4 @@ pub mod build {
             }
         }
     }
-
 }
